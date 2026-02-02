@@ -153,11 +153,11 @@ spec:
            vm-selector: my-vm
     ports:
      - protocol: UDP
-       port: 0
-       endPort: 65536
+       port: 1
+       endPort: 65000
      - protocol: TCP
-       port: 0
-       endPort: 65536
+       port: 1
+       endPort: 65000
 status:
   conditions:
    - status: "True"
