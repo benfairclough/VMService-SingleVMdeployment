@@ -1,0 +1,163 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: my-vm-bootstrap-secret
+  namespace: vks
+  labels:
+    vm-selector: my-vm
+stringData:
+  user-data: |
+    #cloud-config
+    hostname: MYVM
+    create_hostname_file: true
+    packages:
+      - git
+      - net-tools
+      - npm
+      - traceroute
+      - nginx
+    runcmd:
+      - date > /etc/birth_certificate
+      - git clone https://github.com/benfairclough/code-simplewebsite.git
+      - cp /code-simplewebsite/index.html /var/www/html/
+      - sed -i -e 's/nginx!/nginx!BOX3/g' /var/www/html/index.nginx-debian.html
+      - mkdir -p /etc/apt/keyrings
+      - curl -fsSL https://packages.broadcom.com/artifactory/api/security/keypair/SaltProjectKey/public | sudo tee /etc/apt/keyrings/salt-archive-keyring.pgp
+      - curl -fsSL https://github.com/saltstack/salt-install-guide/releases/latest/download/salt.sources | sudo tee /etc/apt/sources.list.d/salt.sources
+      - sudo apt update
+      - sudo apt install -y salt-minion
+      - sudo mkdir /volumepv
+      - sudo pvcreate /dev/sdb
+      - sudo vgcreate newvg /dev/sdb
+      - sudo lvcreate -l 100%FREE -n lvnew newvg
+      - sudo mkfs.ext4 /dev/newvg/lvnew
+      - sudo mount /dev/newvg/lvnew /volumepv
+---
+apiVersion: vmoperator.vmware.com/v1alpha3
+kind: VirtualMachine
+metadata:
+  name: my-vm
+  namespace: vks
+  labels:
+    vm-selector: my-vm
+    vm-lb: vm-lb-selector
+    topology.kubernetes.io/zone: domain-c10
+spec:
+  className: best-effort-small
+  # Friendly image name: ubu-template
+  imageName: vmi-4c48b6f40db2f6384
+  storageClass: home-mgmt-cl01-optimal-datastore-default-policy-raid5
+  powerState: PoweredOn
+  volumes:
+    - name: my-vm-pvc-0
+      persistentVolumeClaim:
+        claimName: my-vm-pvc-0
+  network:
+    interfaces:
+      - name: eth0
+        network:
+          apiVersion: crd.nsx.vmware.com/v1alpha1
+          kind: Subnet
+          name: my-vm-subnet
+    hostName: my-vm
+    domainName: home.ads
+    nameservers:
+      - 192.168.19.110
+    searchDomains:
+      - home.ads
+  bootstrap:
+    cloudInit:
+      rawCloudConfig:
+        name: my-vm-bootstrap-secret
+        key: user-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-vm-pvc-0
+  namespace: vks
+  labels:
+    vm-selector: my-vm
+  annotations:
+    csi.vsphere.volume-requested-topology: '[{"topology.kubernetes.io/zone":"domain-c10"}]'
+spec:
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Block
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: home-mgmt-cl01-optimal-datastore-default-policy-raid5
+---
+apiVersion: crd.nsx.vmware.com/v1alpha1
+kind: Subnet
+metadata:
+  annotations: {}
+  name: my-vm-subnet
+  namespace: vks
+spec:
+  subnetDHCPConfig: {mode: "DHCPServer"}
+  accessMode: Public
+  ipv4SubnetSize: 16
+---
+apiVersion: crd.nsx.vmware.com/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: my-vm-fw
+  namespace: vks
+spec:
+#Priority and appliedTo - This ensures the place of the rule for order,
+#Applied to ensure only ensures the defined PODs,VMs are allocated to the rule - This speeds up rule processing
+  priority: 1
+  appliedTo:
+  - vmSelector:
+      matchLabels:
+        vm-selector: my-vm
+#Rule are an array each object in this example starts with "-" and a name definition
+# Direction - Ingress you can only add sources! - Egress you can only add destinations!
+# Actions - String - allow or drop
+# In the rules section the higher the rule in the code the higer prioirty it has
+  rules:
+  - name: "Pods/VMs to my PODS/VMS in "
+    direction: Ingress
+    action: allow
+    sources:
+     - vmSelector:
+         matchLabels:
+           vm-selector: my-vm
+     - podSelector:
+         matchLabels:
+           vm-selector: my-vm
+    ports:
+     - protocol: UDP
+       port: 53
+     - protocol: TCP
+       port: 80
+       endPort: 443
+     - protocol: TCP
+       port: 4443
+       endPort: 4443
+    ports:
+     - protocol: TCP
+       port: 80
+       endPort: 443
+  - name: "Pods/VMs to my PODS/VMS out"
+    direction : Egress
+    action: allow
+    destinations:
+     - vmSelector:
+         matchLabels:
+           vm-selector: my-vm
+     - podSelector:
+         matchLabels:
+           vm-selector: my-vm
+    ports:
+     - protocol: UDP
+       port: 0
+       endPort: 65536
+     - protocol: TCP
+       port: 0
+       endPort: 65536
+status:
+  conditions:
+   - status: "True"
